@@ -23,5 +23,5 @@ Notes:
 - `install_app` expects an IPA path that already exists on the device. Use `upload_file` first for a computer-local IPA.
 - `screenshot` returns MCP image content, not text: `result.content[0].type` is `image`, `mimeType` is usually `image/jpeg`, and `data` contains the base64 JPEG payload.
 - Some tools are stateful or disruptive, such as `press_power`, `kill_app`, `install_app`, `uninstall_app`, `open_url`, and text input tools.
-- `long_press`, `double_tap`, and `drag_and_drop` call the same HID event path as tap/swipe and may change the foreground app state.
+- `long_press`, `double_tap`, and `drag_and_drop` call the same HID event path as tap/swipe and may change the foreground app state. `drag_and_drop` can use `points` to drag along a path and release at the last point.
 - If the device IP changes, update `baseUrl` in the environment before testing.
