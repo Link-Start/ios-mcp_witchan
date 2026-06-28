@@ -4,11 +4,14 @@
  * Must be installed with setuid bit: chmod 4755 mcp-root
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <spawn.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #ifdef MCP_ROOTHIDE
@@ -24,7 +27,21 @@ typedef enum {
     MCP_ALLOWED_COMMAND_LDID,
     MCP_ALLOWED_COMMAND_CHMOD,
     MCP_ALLOWED_COMMAND_LAUNCHCTL,
+    MCP_ALLOWED_COMMAND_ID,
+    MCP_ALLOWED_COMMAND_DPKG,
 } MCPAllowedCommand;
+
+static void print_usage(const char *program) {
+    fprintf(stderr, "Usage: %s <command> [args...]\n", program);
+    fprintf(stderr, "Allowed commands:\n");
+    fprintf(stderr, "  /usr/bin/mcp-roothelper <ipa>\n");
+    fprintf(stderr, "  /usr/bin/mcp-appinst <ipa>\n");
+    fprintf(stderr, "  /usr/bin/mcp-ldid [ldid args...]\n");
+    fprintf(stderr, "  /bin/chmod 0644|0755 <app-container-path>...\n");
+    fprintf(stderr, "  /bin/launchctl kickstart -k <approved-accessibility-service>\n");
+    fprintf(stderr, "  /usr/bin/id\n");
+    fprintf(stderr, "  /usr/bin/dpkg -i|--install|--unpack [safe dpkg options] <absolute .deb path>...\n");
+}
 
 static const char *resolve_command_path(const char *path) {
     if (!path || path[0] == '\0') {
@@ -40,6 +57,18 @@ static const char *resolve_command_path(const char *path) {
     const char *rootfsPath = rootfs(path);
     if (rootfsPath && access(rootfsPath, X_OK) == 0) {
         return rootfsPath;
+    }
+#endif
+
+#ifndef MCP_ROOTHIDE
+    if (path[0] == '/' && strncmp(path, "/var/jb/", 8) != 0) {
+        static char rootlessPaths[4][PATH_MAX];
+        static unsigned int rootlessPathIndex = 0;
+        char *candidate = rootlessPaths[rootlessPathIndex++ % 4];
+        int written = snprintf(candidate, PATH_MAX, "/var/jb%s", path);
+        if (written > 0 && written < PATH_MAX && access(candidate, X_OK) == 0) {
+            return candidate;
+        }
     }
 #endif
 
@@ -123,6 +152,64 @@ static int path_is_allowed_chmod_target(const char *path) {
     return 0;
 }
 
+static int path_has_deb_extension(const char *path) {
+    size_t len;
+
+    if (!path) {
+        return 0;
+    }
+
+    len = strlen(path);
+    if (len < 4) {
+        return 0;
+    }
+
+    return strcasecmp(path + len - 4, ".deb") == 0;
+}
+
+static int path_is_deb_file(const char *path) {
+    char resolvedPath[PATH_MAX];
+    struct stat st;
+    int fd;
+    char header[8];
+    ssize_t bytesRead;
+
+    if (!path || path[0] != '/') {
+        fprintf(stderr, "dpkg package path must be absolute: %s\n", path ? path : "(null)");
+        return 0;
+    }
+
+    if (!path_has_deb_extension(path)) {
+        fprintf(stderr, "dpkg package path must end with .deb: %s\n", path);
+        return 0;
+    }
+
+    if (!canonicalize_existing_path(path, resolvedPath, sizeof(resolvedPath))) {
+        fprintf(stderr, "dpkg package does not exist: %s\n", path);
+        return 0;
+    }
+
+    if (stat(resolvedPath, &st) != 0 || !S_ISREG(st.st_mode)) {
+        fprintf(stderr, "dpkg package is not a regular file: %s\n", path);
+        return 0;
+    }
+
+    fd = open(resolvedPath, O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "cannot open dpkg package: %s\n", path);
+        return 0;
+    }
+
+    bytesRead = read(fd, header, sizeof(header));
+    close(fd);
+    if (bytesRead != (ssize_t)sizeof(header) || memcmp(header, "!<arch>\n", sizeof(header)) != 0) {
+        fprintf(stderr, "dpkg package is not a deb archive: %s\n", path);
+        return 0;
+    }
+
+    return 1;
+}
+
 static int validate_chmod_arguments(int argc, char *argv[]) {
     int i;
 
@@ -171,6 +258,97 @@ static int validate_launchctl_arguments(int argc, char *argv[]) {
     return 1;
 }
 
+static int is_allowed_dpkg_option(const char *arg) {
+    static const char *const allowedOptions[] = {
+        "--force-all",
+        "--force-depends",
+        "--force-overwrite",
+        "--force-confnew",
+        "--force-confold",
+        "--force-confdef",
+        "--force-unsafe-io",
+        "--no-triggers",
+    };
+    size_t i;
+
+    if (!arg) {
+        return 0;
+    }
+
+    for (i = 0; i < sizeof(allowedOptions) / sizeof(allowedOptions[0]); i++) {
+        if (strcmp(arg, allowedOptions[i]) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int validate_id_arguments(int argc, char *argv[]) {
+    (void)argv;
+
+    if (argc != 2) {
+        fprintf(stderr, "id usage is restricted to id with no arguments\n");
+        return 0;
+    }
+
+    return 1;
+}
+
+static int validate_dpkg_arguments(int argc, char *argv[]) {
+    int i;
+    int sawInstallOperation = 0;
+    int packageCount = 0;
+
+    if (argc < 4) {
+        fprintf(stderr, "dpkg usage is restricted to -i|--install|--unpack with .deb packages\n");
+        return 0;
+    }
+
+    for (i = 2; i < argc; i++) {
+        const char *arg = argv[i];
+
+        if (!arg || arg[0] == '\0') {
+            fprintf(stderr, "invalid empty dpkg argument\n");
+            return 0;
+        }
+
+        if (strcmp(arg, "-i") == 0 || strcmp(arg, "--install") == 0 || strcmp(arg, "--unpack") == 0) {
+            if (sawInstallOperation) {
+                fprintf(stderr, "dpkg install operation may only be specified once\n");
+                return 0;
+            }
+            sawInstallOperation = 1;
+            continue;
+        }
+
+        if (arg[0] == '-') {
+            if (!is_allowed_dpkg_option(arg)) {
+                fprintf(stderr, "dpkg option is not permitted: %s\n", arg);
+                return 0;
+            }
+            continue;
+        }
+
+        if (!sawInstallOperation) {
+            fprintf(stderr, "dpkg package paths must follow -i, --install, or --unpack\n");
+            return 0;
+        }
+
+        if (!path_is_deb_file(arg)) {
+            return 0;
+        }
+        packageCount++;
+    }
+
+    if (!sawInstallOperation || packageCount == 0) {
+        fprintf(stderr, "dpkg requires -i|--install|--unpack and at least one .deb package\n");
+        return 0;
+    }
+
+    return 1;
+}
+
 static MCPAllowedCommand classify_allowed_command(const char *command_path) {
     struct {
         const char *logical_path;
@@ -183,6 +361,12 @@ static MCPAllowedCommand classify_allowed_command(const char *command_path) {
         {"/usr/bin/chmod", MCP_ALLOWED_COMMAND_CHMOD},
         {"/bin/launchctl", MCP_ALLOWED_COMMAND_LAUNCHCTL},
         {"/usr/bin/launchctl", MCP_ALLOWED_COMMAND_LAUNCHCTL},
+        {"/bin/id", MCP_ALLOWED_COMMAND_ID},
+        {"/usr/bin/id", MCP_ALLOWED_COMMAND_ID},
+        {"/var/jb/bin/id", MCP_ALLOWED_COMMAND_ID},
+        {"/var/jb/usr/bin/id", MCP_ALLOWED_COMMAND_ID},
+        {"/usr/bin/dpkg", MCP_ALLOWED_COMMAND_DPKG},
+        {"/var/jb/usr/bin/dpkg", MCP_ALLOWED_COMMAND_DPKG},
     };
     size_t i;
 
@@ -198,13 +382,25 @@ static MCPAllowedCommand classify_allowed_command(const char *command_path) {
 
 int main(int argc, char *argv[]) {
     MCPAllowedCommand allowedCommand;
-    const char *command_path;
+    const char *resolved_command_path;
+    char command_path[PATH_MAX];
+
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <command> [args...]\n", argv[0]);
+        print_usage(argv[0]);
         return 1;
     }
 
-    command_path = resolve_command_path(argv[1]);
+    if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+        print_usage(argv[0]);
+        return 0;
+    }
+
+    resolved_command_path = resolve_command_path(argv[1]);
+    if (!resolved_command_path || strlen(resolved_command_path) >= sizeof(command_path)) {
+        fprintf(stderr, "Command path is invalid or too long: %s\n", argv[1] ? argv[1] : "(null)");
+        return 126;
+    }
+    snprintf(command_path, sizeof(command_path), "%s", resolved_command_path);
     allowedCommand = classify_allowed_command(command_path);
     if (allowedCommand == MCP_ALLOWED_COMMAND_NONE) {
         fprintf(stderr, "Command is not permitted: %s\n", argv[1]);
@@ -215,6 +411,12 @@ int main(int argc, char *argv[]) {
         return 126;
     }
     if (allowedCommand == MCP_ALLOWED_COMMAND_LAUNCHCTL && !validate_launchctl_arguments(argc, argv)) {
+        return 126;
+    }
+    if (allowedCommand == MCP_ALLOWED_COMMAND_ID && !validate_id_arguments(argc, argv)) {
+        return 126;
+    }
+    if (allowedCommand == MCP_ALLOWED_COMMAND_DPKG && !validate_dpkg_arguments(argc, argv)) {
         return 126;
     }
 
@@ -229,6 +431,7 @@ int main(int argc, char *argv[]) {
     }
 
     pid_t pid = 0;
+    argv[1] = command_path;
     int spawnStatus = posix_spawn(&pid, command_path, NULL, NULL, &argv[1], environ);
     if (spawnStatus != 0) {
         fprintf(stderr, "posix_spawn(%s) failed: %s\n", command_path, strerror(spawnStatus));

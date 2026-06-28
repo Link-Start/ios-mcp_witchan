@@ -98,7 +98,7 @@ curl 'http://设备IP:8090/download_file?path=/var/mobile/...' -o output.bin
 - `run_command` 工具可执行任意 Shell 命令，请谨慎使用
 - `read_file` / `write_file` / `download_file` 可读写 MCP 服务进程权限范围内的设备路径，与 `run_command` 风险等级一致，请仅在可信网络使用
 - `get_syslog` 通过 `mcp-logreader`（签 `com.apple.private.logging.stream` entitlement）读取全 App 实时日志，可能包含敏感信息，请仅在可信网络使用
-- `mcp-root` 提供 root 提权能力，仅限包内工具使用
+- `mcp-root` 提供受限 root 提权能力，仅允许包内工具、受限 chmod/launchctl、无参数 id，以及受限 `dpkg -i|--install|--unpack <绝对路径.deb>`；它不是通用 sudo
 
 ## 社区交流
 
