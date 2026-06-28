@@ -683,14 +683,14 @@ static uint32_t IOSMCPCRC32(NSData *data) {
             @"你可以通过 iOS MCP 服务操作一台 iPhone 设备。\n\n"
             @"MCP 地址: %@\n\n"
             @"支持的操作:\n"
-            @"- 触控：点击、滑动、长按、双击、拖拽\n"
+            @"- 触控：点击、滑动、长按、双击、拖拽（drag_and_drop 可传 points 按路径拖动，最后一点放开）\n"
             @"- 元素操作：tap_element 按文本/标签直接点击元素，wait_for_element/wait_for_disappear 等待元素出现或消失\n"
             @"- 文字输入：快速粘贴输入、逐字键盘模拟、特殊键（回车、删除等）\n"
             @"- 硬件按键：Home、电源、音量、静音\n"
             @"- 唤醒/回到主屏：wake_and_home（锁屏或熄屏时优先使用）\n"
             @"- 截图（screenshot 返回 MCP image content，不是 text；图片 base64 在 result.content[0].data，mimeType 通常是 image/jpeg）\n"
             @"- 屏幕识别：ocr_screen 识别屏幕文字并返回坐标，describe_screen 一次返回前台 App+元素+可选 OCR/截图\n"
-            @"- App 管理：启动、关闭、列表、安装 IPA（无需签名）、卸载、get_app_info 查询沙盒/容器路径与 entitlements\n"
+            @"- App 管理：启动、关闭、列表，安装 IPA 或 DEB（电脑本地文件先 POST /upload_file，再把返回的设备路径传给 install_app；IPA 可无需签名；DEB 使用 dpkg，成功后会重启 SpringBoard），卸载 App 或 DEB（App 用 bundle_id，DEB 用 package_id），get_app_info 查询沙盒/容器路径与 entitlements\n"
             @"- UI 无障碍：获取当前页面节点树、坐标查询元素\n"
             @"- 文件系统：list_dir 列目录、read_file 读文件、write_file 写文件（大文件用 GET /download_file 下载）\n"
             @"- 日志：get_syslog 全 App 实时系统日志、get_crash_logs/read_crash_log 崩溃日志\n"
@@ -708,8 +708,9 @@ static uint32_t IOSMCPCRC32(NSData *data) {
             @"6. 页面变化后重新读取 UI 节点，或用 wait_for_element 等待目标出现，再继续下一步。\n"
             @"7. 如果 UI 节点抓不到目标（如游戏、Flutter/RN、Canvas 渲染页面），用 ocr_screen 识别文字坐标后再点击。\n"
             @"8. 文本输入先用 input_text；如果 input_text 失败、超时或返回 isError，立即用 type_text 输入同一段文本，不要反复调用 input_text。\n"
-            @"9. 健康检查不要使用 for i in {1..30}，因为某些 /bin/sh 不展开花括号。使用 while/seq，并设置 --connect-timeout 3 --max-time 5，例如：i=0; while [ $i -lt 30 ]; do r=$(curl -sS --connect-timeout 3 --max-time 5 %@ 2>/dev/null || true); [ -n \"$r\" ] && echo \"$r\" && exit 0; i=$((i+1)); sleep 1; done; echo health_timeout; exit 1\n"
-            @"10. 处理 screenshot 结果时，按 image content 解析，不要读取 result.content[0].text。",
+            @"9. 健康检查优先单次 curl，并设置超时，例如：curl -sS --connect-timeout 3 --max-time 5 %@。如果刚安装/卸载 DEB 导致 SpringBoard 重启，先 sleep 几秒后再单次检测；确需轮询时用 while/seq，不要用 for i in {1..30} 这类花括号展开。\n"
+            @"10. 处理 screenshot 结果时，按 image content 解析，不要读取 result.content[0].text。\n"
+            @"11. install_app 安装 DEB 只安装本地 .deb，不会自动联网下载依赖；如有第三方依赖，先上传并安装依赖包。DEB 安装/卸载会重启 SpringBoard，等待 /health 恢复后再继续。",
             IOSMCPServiceURLString(),
             IOSMCPHealthURLString()];
 }
