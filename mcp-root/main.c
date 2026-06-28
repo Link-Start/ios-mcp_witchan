@@ -4,6 +4,7 @@
  * Must be installed with setuid bit: chmod 4755 mcp-root
  */
 #include <errno.h>
+#include <ctype.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <spawn.h>
@@ -41,6 +42,7 @@ static void print_usage(const char *program) {
     fprintf(stderr, "  /bin/launchctl kickstart -k <approved-accessibility-service>\n");
     fprintf(stderr, "  /usr/bin/id\n");
     fprintf(stderr, "  /usr/bin/dpkg -i|--install|--unpack [safe dpkg options] <absolute .deb path>...\n");
+    fprintf(stderr, "  /usr/bin/dpkg -s|--status|-r|--remove|--purge <package-id>\n");
 }
 
 static const char *resolve_command_path(const char *path) {
@@ -210,6 +212,33 @@ static int path_is_deb_file(const char *path) {
     return 1;
 }
 
+static int is_valid_dpkg_package_id(const char *package_id) {
+    size_t len;
+    size_t i;
+
+    if (!package_id) {
+        return 0;
+    }
+
+    len = strlen(package_id);
+    if (len == 0 || len > 128) {
+        return 0;
+    }
+
+    if (!isalnum((unsigned char)package_id[0])) {
+        return 0;
+    }
+
+    for (i = 1; i < len; i++) {
+        unsigned char ch = (unsigned char)package_id[i];
+        if (!isalnum(ch) && ch != '+' && ch != '-' && ch != '.') {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 static int validate_chmod_arguments(int argc, char *argv[]) {
     int i;
 
@@ -295,13 +324,21 @@ static int validate_id_arguments(int argc, char *argv[]) {
     return 1;
 }
 
+typedef enum {
+    MCP_DPKG_OPERATION_NONE = 0,
+    MCP_DPKG_OPERATION_INSTALL,
+    MCP_DPKG_OPERATION_STATUS,
+    MCP_DPKG_OPERATION_REMOVE,
+} MCPDpkgOperation;
+
 static int validate_dpkg_arguments(int argc, char *argv[]) {
     int i;
-    int sawInstallOperation = 0;
+    MCPDpkgOperation operation = MCP_DPKG_OPERATION_NONE;
     int packageCount = 0;
+    int sawInstallOption = 0;
 
     if (argc < 4) {
-        fprintf(stderr, "dpkg usage is restricted to -i|--install|--unpack with .deb packages\n");
+        fprintf(stderr, "dpkg usage is restricted to install/status/remove operations\n");
         return 0;
     }
 
@@ -314,11 +351,37 @@ static int validate_dpkg_arguments(int argc, char *argv[]) {
         }
 
         if (strcmp(arg, "-i") == 0 || strcmp(arg, "--install") == 0 || strcmp(arg, "--unpack") == 0) {
-            if (sawInstallOperation) {
-                fprintf(stderr, "dpkg install operation may only be specified once\n");
+            if (operation != MCP_DPKG_OPERATION_NONE) {
+                fprintf(stderr, "dpkg operation may only be specified once\n");
                 return 0;
             }
-            sawInstallOperation = 1;
+            operation = MCP_DPKG_OPERATION_INSTALL;
+            continue;
+        }
+
+        if (strcmp(arg, "-s") == 0 || strcmp(arg, "--status") == 0) {
+            if (operation != MCP_DPKG_OPERATION_NONE) {
+                fprintf(stderr, "dpkg operation may only be specified once\n");
+                return 0;
+            }
+            if (sawInstallOption) {
+                fprintf(stderr, "dpkg install options are not permitted for status operations\n");
+                return 0;
+            }
+            operation = MCP_DPKG_OPERATION_STATUS;
+            continue;
+        }
+
+        if (strcmp(arg, "-r") == 0 || strcmp(arg, "--remove") == 0 || strcmp(arg, "--purge") == 0) {
+            if (operation != MCP_DPKG_OPERATION_NONE) {
+                fprintf(stderr, "dpkg operation may only be specified once\n");
+                return 0;
+            }
+            if (sawInstallOption) {
+                fprintf(stderr, "dpkg install options are not permitted for remove operations\n");
+                return 0;
+            }
+            operation = MCP_DPKG_OPERATION_REMOVE;
             continue;
         }
 
@@ -327,22 +390,44 @@ static int validate_dpkg_arguments(int argc, char *argv[]) {
                 fprintf(stderr, "dpkg option is not permitted: %s\n", arg);
                 return 0;
             }
+            if (operation == MCP_DPKG_OPERATION_STATUS || operation == MCP_DPKG_OPERATION_REMOVE) {
+                fprintf(stderr, "dpkg option is only permitted for install operations: %s\n", arg);
+                return 0;
+            }
+            sawInstallOption = 1;
             continue;
         }
 
-        if (!sawInstallOperation) {
-            fprintf(stderr, "dpkg package paths must follow -i, --install, or --unpack\n");
+        if (operation == MCP_DPKG_OPERATION_NONE) {
+            fprintf(stderr, "dpkg package paths or ids must follow an allowed operation\n");
             return 0;
         }
 
-        if (!path_is_deb_file(arg)) {
-            return 0;
+        if (operation == MCP_DPKG_OPERATION_INSTALL) {
+            if (!path_is_deb_file(arg)) {
+                return 0;
+            }
+        } else {
+            if (!is_valid_dpkg_package_id(arg)) {
+                fprintf(stderr, "dpkg package id is not permitted: %s\n", arg);
+                return 0;
+            }
         }
         packageCount++;
     }
 
-    if (!sawInstallOperation || packageCount == 0) {
-        fprintf(stderr, "dpkg requires -i|--install|--unpack and at least one .deb package\n");
+    if (operation == MCP_DPKG_OPERATION_NONE || packageCount == 0) {
+        fprintf(stderr, "dpkg requires an allowed operation and package argument\n");
+        return 0;
+    }
+
+    if (sawInstallOption && operation != MCP_DPKG_OPERATION_INSTALL) {
+        fprintf(stderr, "dpkg install options require an install operation\n");
+        return 0;
+    }
+
+    if (operation != MCP_DPKG_OPERATION_INSTALL && packageCount != 1) {
+        fprintf(stderr, "dpkg status/remove operations require exactly one package id\n");
         return 0;
     }
 
