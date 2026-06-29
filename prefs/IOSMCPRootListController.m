@@ -89,9 +89,21 @@ static uint32_t IOSMCPCRC32(NSData *data) {
 }
 
 - (void)copyPrompt:(PSSpecifier *)specifier {
-    [UIPasteboard generalPasteboard].string = [self codexPrompt];
-    [self showAlertWithTitle:@"已复制"
-                     message:@"MCP 提示词片段已复制到剪贴板，粘贴到你的提示词中即可。"];
+    NSString *prompt = [self codexPrompt];
+    if (prompt.length == 0) {
+        [self showAlertWithTitle:@"分享失败" message:@"无法生成 MCP 提示词片段。"];
+        return;
+    }
+
+    [UIPasteboard generalPasteboard].string = prompt;
+    UITableViewCell *sourceCell = [self cachedCellForSpecifier:specifier];
+    [self deselectSpecifier:specifier];
+
+    [MCPLogger log:@"prefs_share_prompt copied chars=%lu", (unsigned long)prompt.length];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), ^{
+        [self presentPromptShareSheetWithText:prompt sourceCell:sourceCell];
+    });
 }
 
 - (void)shareDebugLogs:(PSSpecifier *)specifier {
@@ -188,7 +200,7 @@ static uint32_t IOSMCPCRC32(NSData *data) {
             }
 
             UITableViewCell *sourceCell = [self cachedCellForSpecifier:specifier];
-            [self deselectDebugLogSpecifier:specifier];
+            [self deselectSpecifier:specifier];
 
             if (zipped) {
                 NSURL *zipURL = [NSURL fileURLWithPath:zipPath];
@@ -364,7 +376,7 @@ static uint32_t IOSMCPCRC32(NSData *data) {
     return ok;
 }
 
-- (void)deselectDebugLogSpecifier:(PSSpecifier *)specifier {
+- (void)deselectSpecifier:(PSSpecifier *)specifier {
     if (![self respondsToSelector:@selector(indexPathForSpecifier:)]) {
         return;
     }
@@ -374,6 +386,51 @@ static uint32_t IOSMCPCRC32(NSData *data) {
     if (indexPath && tableView) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
     }
+}
+
+- (void)presentPromptShareSheetWithText:(NSString *)prompt sourceCell:(UITableViewCell *)sourceCell {
+    if (prompt.length == 0) {
+        [self showAlertWithTitle:@"分享失败" message:@"无法生成 MCP 提示词片段。"];
+        return;
+    }
+
+    UIActivityViewController *activityController =
+        [[UIActivityViewController alloc] initWithActivityItems:@[prompt]
+                                         applicationActivities:nil];
+    activityController.completionWithItemsHandler = ^(__unused UIActivityType activityType,
+                                                      BOOL completed,
+                                                      __unused NSArray *returnedItems,
+                                                      NSError *activityError) {
+        [MCPLogger log:@"prefs_share_prompt completed=%@ error=%@",
+         completed ? @"yes" : @"no",
+         activityError.localizedDescription ?: @"<nil>"];
+    };
+
+    UIViewController *presenter = self;
+    while (presenter.presentedViewController && !presenter.presentedViewController.isBeingDismissed) {
+        presenter = presenter.presentedViewController;
+    }
+
+    UIPopoverPresentationController *popover = activityController.popoverPresentationController;
+    if (popover) {
+        UIView *anchorView = (sourceCell && sourceCell.window) ? sourceCell.contentView : presenter.view;
+        popover.sourceView = anchorView;
+        popover.sourceRect = CGRectMake(CGRectGetMidX(anchorView.bounds),
+                                        CGRectGetMidY(anchorView.bounds),
+                                        1.0,
+                                        1.0);
+        popover.permittedArrowDirections = UIPopoverArrowDirectionAny;
+    }
+
+    [MCPLogger log:@"prefs_share_prompt presenting presenter=%@ popover=%@ chars=%lu",
+     NSStringFromClass([presenter class]),
+     popover ? @"yes" : @"no",
+     (unsigned long)prompt.length];
+    [presenter presentViewController:activityController
+                           animated:YES
+                         completion:^{
+        [MCPLogger log:@"prefs_share_prompt presentation_completed"];
+    }];
 }
 
 - (void)presentDebugLogShareSheetWithURL:(NSURL *)reportURL sourceCell:(UITableViewCell *)sourceCell {
